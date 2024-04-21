@@ -121,7 +121,7 @@ serve(async (req) => {
       prompt,
       max_tokens: 512,
       temperature: 0,
-      stream: true,
+      stream: false,
     };
 
     // The Fetch API allows for easier response streaming over the OpenAI client.
@@ -143,7 +143,7 @@ serve(async (req) => {
     return new Response(response.body, {
       headers: {
         ...corsHeaders,
-        "Content-Type": "text/event-stream",
+        "Content-Type": "text/application/json",
       },
     });
   } catch (err: unknown) {
