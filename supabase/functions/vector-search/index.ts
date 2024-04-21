@@ -3,19 +3,24 @@ import { serve } from "std/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
 import { codeBlock, oneLine } from "commmon-tags";
 import GPT3Tokenizer from "gpt3-tokenizer";
-import { Configuration, CreateCompletionRequest, OpenAIApi } from "openai";
+import { Configuration, OpenAIApi } from "openai";
+import OpenAI from 'https://deno.land/x/openai@v4.24.0/mod.ts'
 import { ensureGetEnv } from "../_utils/env.ts";
 import { ApplicationError, UserError } from "../_utils/errors.ts";
 
 const OPENAI_KEY = ensureGetEnv("OPENAI_KEY");
+  const openai = new OpenAI({
+    apiKey: OPENAI_KEY,
+  })
+const openAiConfiguration = new Configuration({ apiKey: OPENAI_KEY });
+const openaiOld = new OpenAIApi(openAiConfiguration);
 const SUPABASE_URL = ensureGetEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = ensureGetEnv("SUPABASE_SERVICE_ROLE_KEY");
 
 const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
   db: { schema: "docs" },
 });
-const openAiConfiguration = new Configuration({ apiKey: OPENAI_KEY });
-const openai = new OpenAIApi(openAiConfiguration);
+
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -38,21 +43,7 @@ serve(async (req) => {
 
     const sanitizedQuery = query.trim();
 
-    // Moderate the content to comply with OpenAI T&C
-    const moderationResponse = await openai.createModeration({
-      input: sanitizedQuery,
-    });
-
-    const [results] = moderationResponse.data.results;
-
-    if (results.flagged) {
-      throw new UserError("Flagged content", {
-        flagged: true,
-        categories: results.categories,
-      });
-    }
-
-    const embeddingResponse = await openai.createEmbedding({
+    const embeddingResponse = await openaiOld.createEmbedding({
       model: "text-embedding-ada-002",
       input: sanitizedQuery.replaceAll("\n", " "),
     });
@@ -98,13 +89,9 @@ serve(async (req) => {
 
     const prompt = codeBlock`
       ${oneLine`
-        You are a very enthusiastic Supabase representative who loves
-        to help people! Given the following sections from the Supabase
-        documentation, answer the question using only that information,
-        outputted in markdown format. If you are unsure and the answer
-        is not explicitly written in the documentation, say
-        "Sorry, I don't know how to help with that."
-      `}
+        You are an amazing and very helpful teammate in a group project for an IS Senior Project course. 
+        Given the following sections from your group project's docs (syllabus, project instructions, etc), answer the question using only that information,
+        outputted in markdown format.`}
 
       Context sections:
       ${contextText}
@@ -116,34 +103,17 @@ serve(async (req) => {
       Answer as markdown (including related code snippets if available):
     `;
 
-    const completionOptions: CreateCompletionRequest = {
-      model: "gpt-3.5-turbo-instruct",
-      prompt,
-      max_tokens: 512,
-      temperature: 0,
+    const chatCompletion = await openai.chat.completions.create({
+      messages: [{ role: 'system', content: prompt }, { role: 'user', content: query }],
+      model: 'gpt-3.5-turbo-0125',
       stream: false,
-    };
-
-    // The Fetch API allows for easier response streaming over the OpenAI client.
-    const response = await fetch("https://api.openai.com/v1/completions", {
-      headers: {
-        Authorization: `Bearer ${OPENAI_KEY}`,
-        "Content-Type": "application/json",
-      },
-      method: "POST",
-      body: JSON.stringify(completionOptions),
-    });
-
-    if (!response.ok) {
-      const error = await response.json();
-      throw new ApplicationError("Failed to generate completion", error);
-    }
+    })
 
     // Proxy the streamed SSE response from OpenAI
-    return new Response(response.body, {
+    return new Response(chatCompletion.choices[0].message.content, {
       headers: {
         ...corsHeaders,
-        "Content-Type": "text/application/json",
+        "Content-Type": "text/plain",
       },
     });
   } catch (err: unknown) {
