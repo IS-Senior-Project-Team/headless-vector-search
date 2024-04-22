@@ -2,7 +2,6 @@ import "xhr";
 import { serve } from "std/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
 import { codeBlock, oneLine } from "commmon-tags";
-import GPT3Tokenizer from "gpt3-tokenizer";
 import { Configuration, OpenAIApi } from "openai";
 import OpenAI from 'https://deno.land/x/openai@v4.24.0/mod.ts'
 import { ensureGetEnv } from "../_utils/env.ts";
@@ -61,9 +60,9 @@ serve(async (req) => {
       "match_page_sections",
       {
         embedding,
-        match_threshold: 0.78,
-        match_count: 10,
-        min_content_length: 50,
+        match_threshold: 0.4,
+        match_count: 5,
+        min_content_length: 10,
       }
     );
 
@@ -71,27 +70,24 @@ serve(async (req) => {
       throw new ApplicationError("Failed to match page sections", matchError);
     }
 
-    const tokenizer = new GPT3Tokenizer({ type: "gpt3" });
-    let tokenCount = 0;
     let contextText = "";
 
     for (const pageSection of pageSections) {
       const content = pageSection.content;
-      const encoded = tokenizer.encode(content);
-      tokenCount += encoded.text.length;
-
-      if (tokenCount >= 1500) {
-        break;
-      }
-
       contextText += `${content.trim()}\n---\n`;
     }
 
-    const prompt = codeBlock`
+    const systemPrompt = `
       ${oneLine`
-        You are an amazing and very helpful teammate in a group project for an IS Senior Project course. 
-        Given the following sections from your group project's docs (syllabus, project instructions, etc), answer the question using only that information,
-        outputted in markdown format.`}
+      You are a direct yet helpful teammate in a group project for an IS Senior Project course. 
+      
+      You will be provided with a question and context sections that can be used to reply to the question.
+      If a response to the question so it is not explicitly written in the documentation, leave a random joke about AI`}
+
+      Stay concise with your answer, replying specifically to the input prompt without mentioning additional information provided in the context content.
+    `;
+
+    const prompt = `
 
       Context sections:
       ${contextText}
@@ -100,13 +96,13 @@ serve(async (req) => {
       ${sanitizedQuery}
       """
 
-      Answer as markdown (including related code snippets if available):
+      Answer the Question given the Context sections as markdown:
     `;
-
     const chatCompletion = await openai.chat.completions.create({
-      messages: [{ role: 'system', content: prompt }, { role: 'user', content: query }],
-      model: 'gpt-3.5-turbo-0125',
+      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+      model: 'gpt-3.5-turbo',
       stream: false,
+      temperature: 1
     })
 
     // Proxy the streamed SSE response from OpenAI
