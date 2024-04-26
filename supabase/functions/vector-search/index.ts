@@ -74,10 +74,17 @@ serve(async (req) => {
       const { error: matchError, data: allText } = await supabaseClient.rpc("combine_page_contents");
       contextText = String(allText);
     }
+    const formatDateUppercase = (date) => {
+      const month = date.toLocaleString('en-US', { month: 'long' }).toUpperCase();
+      const day = date.getDate();
+    
+      return `${month} ${day}`;
+    };
+    
     const systemPrompt = `
       ${oneLine`
       You are a direct yet helpful teammate in a group project for an IS Senior Project course. 
-      
+      Today's date is ${formatDateUppercase(new Date())}, use this to provide time relevant information in your response
       You will be provided with a question and documentation that can be used to reply to the question.
       If a answer to the question is not explicitly written in the documentation, leave a random joke about AI`}
     `;
