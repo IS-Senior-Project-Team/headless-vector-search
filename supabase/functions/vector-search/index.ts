@@ -2,24 +2,16 @@ import "xhr";
 import { serve } from "std/http/server.ts";
 import { createClient } from "@supabase/supabase-js";
 import { codeBlock, oneLine } from "commmon-tags";
-import { Configuration, OpenAIApi } from "openai";
 import OpenAI from 'https://deno.land/x/openai@v4.24.0/mod.ts'
 import { ensureGetEnv } from "../_utils/env.ts";
 import { ApplicationError, UserError } from "../_utils/errors.ts";
 
-const OPENAI_KEY = ensureGetEnv("OPENAI_KEY");
-  const openai = new OpenAI({
-    apiKey: OPENAI_KEY,
-  })
-const openAiConfiguration = new Configuration({ apiKey: OPENAI_KEY });
-const openaiOld = new OpenAIApi(openAiConfiguration);
 const SUPABASE_URL = ensureGetEnv("SUPABASE_URL");
 const SUPABASE_SERVICE_ROLE_KEY = ensureGetEnv("SUPABASE_SERVICE_ROLE_KEY");
-
+    
 const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
-  db: { schema: "docs" },
+    db: { schema: "docs" },
 });
-
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -39,65 +31,67 @@ serve(async (req) => {
     if (!query) {
       throw new UserError("Missing query in request data");
     }
-
+    const OPENAI_KEY = ensureGetEnv("OPENAI_KEY");
+    const openai = new OpenAI({
+      apiKey: OPENAI_KEY,
+    })
+    
     const sanitizedQuery = query.trim();
 
-    const embeddingResponse = await openaiOld.createEmbedding({
-      model: "text-embedding-ada-002",
+    const embeddingResponse = await openai.embeddings.create({
+      model: "text-embedding-3-small",
       input: sanitizedQuery.replaceAll("\n", " "),
+      encoding_format: "float"
     });
 
-    if (embeddingResponse.status !== 200) {
-      throw new ApplicationError(
-        "Failed to create embedding for question",
-        embeddingResponse
-      );
-    }
-
-    const [{ embedding }] = embeddingResponse.data.data;
-
+    // if (embeddingResponse.status !== 200) {
+    //   throw new ApplicationError(
+    //     "Failed to create embedding for question",
+    //     embeddingResponse.data[0].embedding
+    //   );
+    // }
+    
+    const embedding = embeddingResponse.data[0].embedding;
     const { error: matchError, data: pageSections } = await supabaseClient.rpc(
       "match_page_sections",
       {
         embedding,
-        match_threshold: 0.4,
-        match_count: 5,
-        min_content_length: 10,
+        match_threshold: 0.18,
+        match_count: 1,
+        min_content_length: 9,
       }
     );
-
     if (matchError) {
       throw new ApplicationError("Failed to match page sections", matchError);
     }
-
     let contextText = "";
 
     for (const pageSection of pageSections) {
       const content = pageSection.content;
       contextText += `${content.trim()}\n---\n`;
     }
-
+    if(pageSections.length == 0) {
+      const { error: matchError, data: allText } = await supabaseClient.rpc("combine_page_contents");
+      contextText = String(allText);
+    }
     const systemPrompt = `
       ${oneLine`
       You are a direct yet helpful teammate in a group project for an IS Senior Project course. 
       
-      You will be provided with a question and context sections that can be used to reply to the question.
-      If a response to the question so it is not explicitly written in the documentation, leave a random joke about AI`}
-
-      Stay concise with your answer, replying specifically to the input prompt without mentioning additional information provided in the context content.
+      You will be provided with a question and documentation that can be used to reply to the question.
+      If a answer to the question is not explicitly written in the documentation, leave a random joke about AI`}
     `;
 
     const prompt = `
 
-      Context sections:
+      Documentation: """
       ${contextText}
-
+      """
       Question: """
       ${sanitizedQuery}
       """
 
-      Answer the Question given the Context sections as markdown:
-    `;
+      Stay concise with your answer, replying specifically to the input prompt without mentioning additional information provided in the context content:`;
     const chatCompletion = await openai.chat.completions.create({
       messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
       model: 'gpt-3.5-turbo',
