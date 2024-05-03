@@ -15,133 +15,129 @@ const supabaseClient = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, {
 
 export const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers":
-    "authorization, x-client-info, apikey, content-type",
+  "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
-serve(async (req) => {
+async function fetchChatBasedOnEmbedding(supabaseClient, questionEmbedding, newChatContent) {
   try {
-    // Handle CORS
-    if (req.method === "OPTIONS") {
-      return new Response("ok", { headers: corsHeaders });
-    }
+    const { data, error } = await supabaseClient.rpc('get_last_five_chats_by_embedding', {
+      question_embedding: questionEmbedding
+    });
 
-    const query = new URL(req.url).searchParams.get("query");
+    if (error) throw new ApplicationError('RPC Error', error);
+    return data || { role: "user", content: newChatContent, chat_embedding: questionEmbedding };
+  } catch (error) {
+    console.error('Error in fetchChatBasedOnEmbedding:', error);
+    throw new ApplicationError('Error fetching or adding chat', error);
+  }
+}
 
-    if (!query) {
-      throw new UserError("Missing query in request data");
-    }
+serve(async (req) => {
+  if (req.method === "OPTIONS") {
+    return new Response("ok", { headers: corsHeaders });
+  }
+  
+  try {
+    const searchParams = new URL(req.url).searchParams;
+    const query = searchParams.get("query");
+    const command = searchParams.get("name") || "General";
+
+    if (!query) throw new UserError("Missing query in request data");
+
     const OPENAI_KEY = ensureGetEnv("OPENAI_KEY");
     const openai = new OpenAI({
       apiKey: OPENAI_KEY,
-    })
-    
-    const sanitizedQuery = query.trim();
-
-    const embeddingResponse = await openai.embeddings.create({
-      model: "text-embedding-3-small",
-      input: sanitizedQuery.replaceAll("\n", " "),
-      encoding_format: "float"
     });
 
-    // if (embeddingResponse.status !== 200) {
-    //   throw new ApplicationError(
-    //     "Failed to create embedding for question",
-    //     embeddingResponse.data[0].embedding
-    //   );
-    // }
+    const sanitizedQuery = query.trim().replaceAll("\n", " ");
+    const embeddingResponse = await openai.embeddings.create({
+      model: "text-embedding-3-small",
+      input: sanitizedQuery,
+      encoding_format: "float"
+    });
     
-    const embedding = embeddingResponse.data[0].embedding;
-    const { error: matchError, data: pageSections } = await supabaseClient.rpc(
-      "match_page_sections",
-      {
-        embedding,
-        match_threshold: 0.18,
-        match_count: 1,
-        min_content_length: 9,
-      }
-    );
-    if (matchError) {
-      throw new ApplicationError("Failed to match page sections", matchError);
-    }
-    let contextText = "";
+    if (embeddingResponse.errors) throw new ApplicationError("Embedding API Error", embeddingResponse.errors);
 
-    for (const pageSection of pageSections) {
-      const content = pageSection.content;
-      contextText += `${content.trim()}\n---\n`;
+    const embedding = embeddingResponse.data[0].embedding;
+    const pageSections = await supabaseClient.rpc("match_page_sections", {
+      embedding,
+      match_threshold: 0.18,
+      match_count: 1,
+      min_content_length: 9,
+    });
+
+    let contextText = pageSections.data.map(ps => `${ps.content.trim()}\n---\n`).join('');
+    if (pageSections.data.length === 0) {
+      const allText = await supabaseClient.rpc("combine_page_contents");
+      contextText = allText.data;
     }
-    if(pageSections.length == 0) {
-      const { error: matchError, data: allText } = await supabaseClient.rpc("combine_page_contents");
-      contextText = String(allText);
-    }
+
     const formatDateUppercase = (date) => {
-      const month = date.toLocaleString('en-US', { month: 'long' }).toUpperCase();
-      const day = date.getDate();
-    
-      return `${month} ${day}`;
+      return date.toLocaleString('en-US', { month: 'long', day: 'numeric' }).toUpperCase();
     };
     
-    const systemPrompt = `
-      ${oneLine`
+    const systemPrompt = oneLine`
       You are a direct yet helpful teammate in a group project for an IS Senior Project course. 
-      Today's date is ${formatDateUppercase(new Date())}, use this to provide time relevant information in your response
-      You will be provided with a question and documentation that can be used to reply to the question.
-      If a answer to the question is not explicitly written in the documentation, leave a random joke about AI`}
+      Today's date is ${formatDateUppercase(new Date())}, use this to provide time relevant information in your response. 
+      You will be provided with a question and documentation that can be used to reply to the question. 
+      If the question is explicitly about technical documentation reply to the best of your ability to assist using the documentation as much as possible, 
+      else assume the question is about the syllabus of the IS Senior Project course. 
+      You can reference outside information, however, stick to the documentation as much as possible
     `;
 
-    const prompt = `
-
-      Documentation: """
+    const prompt = codeBlock`
+      Documentation:
       ${contextText}
-      """
-      Question: """
+      Question about ${command}:
       ${sanitizedQuery}
-      """
+      If documentation is empty or not relevant, reply to the best of your ability with outside knowledge.
+      Stay concise with your answer, replying specifically to the input prompt.
+    `;
 
-      Stay concise with your answer, replying specifically to the input prompt without mentioning additional information provided in the context content:`;
+    const data = await fetchChatBasedOnEmbedding(supabaseClient, embedding, sanitizedQuery);
+    const messages = [{ role: 'system', content: systemPrompt }];
+   
+    data.forEach(chat => messages.push({ role: chat.role ?? "user", content: chat.content }));
+    messages.push({ role: "user", content: prompt });
     const chatCompletion = await openai.chat.completions.create({
-      messages: [{ role: 'system', content: systemPrompt }, { role: 'user', content: prompt }],
+      messages,
       model: 'gpt-3.5-turbo',
       stream: false,
       temperature: 1
-    })
+    });
 
-    // Proxy the streamed SSE response from OpenAI
+    await supabaseClient.from('chat_history').insert({
+      content: sanitizedQuery, response: chatCompletion.choices[0].message.content, role: 'user', chat_embedding: embedding
+    });
+
     return new Response(chatCompletion.choices[0].message.content, {
       headers: {
         ...corsHeaders,
         "Content-Type": "text/plain",
       },
     });
-  } catch (err: unknown) {
-    if (err instanceof UserError) {
-      return Response.json(
-        {
-          error: err.message,
-          data: err.data,
-        },
-        {
-          status: 400,
-          headers: corsHeaders,
-        }
-      );
-    } else if (err instanceof ApplicationError) {
-      // Print out application errors with their additional data
-      console.error(`${err.message}: ${JSON.stringify(err.data)}`);
-    } else {
-      // Print out unexpected errors as is to help with debugging
-      console.error(err);
-    }
-
-    // TODO: include more response info in debug environments
-    return Response.json(
-      {
-        error: "There was an error processing your request",
-      },
-      {
-        status: 500,
-        headers: corsHeaders,
-      }
-    );
+  } catch (err) {
+    return handleError(err);
   }
 });
+
+function handleError(err) {
+  if (err instanceof UserError || err instanceof ApplicationError) {
+    console.error(`${err.name}: ${err.message}`);
+    return new Response(JSON.stringify({
+      error: err.message,
+      data: err.data,
+    }), {
+      status: err instanceof UserError ? 400 : 500,
+      headers: corsHeaders,
+    });
+  } else {
+    console.error('Unexpected error:', err);
+    return new Response(JSON.stringify({
+      error: "There was an error processing your request",
+    }), {
+      status: 500,
+      headers: corsHeaders,
+    });
+  }
+}
