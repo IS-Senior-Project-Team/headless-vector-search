@@ -82,7 +82,8 @@ serve(async (req) => {
       You will be provided with a question and documentation that can be used to reply to the question. 
       If the question is explicitly about technical documentation reply to the best of your ability to assist using the documentation as much as possible, 
       else assume the question is about the syllabus of the IS Senior Project course. 
-      You can reference outside information, however, stick to the documentation as much as possible
+      You can reference outside information, however, stick to the documentation as much as possible.
+      Your response should be short (well under 200 words is preferred) and biases towards short bullet points that are easier to read at a glance
     `;
 
     const prompt = codeBlock`
@@ -103,7 +104,8 @@ serve(async (req) => {
       messages,
       model: 'gpt-3.5-turbo',
       stream: false,
-      temperature: 1
+      temperature: 1,
+      max_tokens: 600
     });
 
     await supabaseClient.from('chat_history').insert({
